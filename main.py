@@ -83,16 +83,13 @@ def is_regular_season():
     現在がレギュラーシーズン中かどうかを判定
     NBAレギュラーシーズン: 通常10月下旬〜4月中旬
     """
-    # 日本時間で判定
     jst = timezone(timedelta(hours=9))
     now = datetime.now(jst)
     
-    # レギュラーシーズンの期間（おおよその目安）
-    # 10月20日〜4月15日をレギュラーシーズンとする
     month = now.month
     day = now.day
     
-    # 10月20日以降 OR 1-4月 OR 4月15日以前
+    # 10月20日以降 OR 11-12月 OR 1-3月 OR 4月15日以前
     if month >= 10 and day >= 20:
         return True
     elif month in [11, 12, 1, 2, 3]:
@@ -105,9 +102,7 @@ def is_regular_season():
 
 
 def has_games_today():
-    """
-    今日NBAの試合があるかどうかをチェック
-    """
+    """今日NBAの試合があるかどうかをチェック"""
     print("今日の試合を確認中...")
     
     headers = {
@@ -132,7 +127,6 @@ def has_games_today():
             
     except requests.exceptions.RequestException as e:
         print(f"⚠️ 試合情報の取得に失敗: {e}")
-        # エラーの場合は投稿を続行（安全側に倒す）
         return True
 
 
@@ -156,38 +150,8 @@ def get_espn_standings():
         raise
 
 
-def format_streak(streak_value):
-    """
-    連勝/連敗を整形
-    正の値 = 連勝、負の値 = 連敗
-    
-    Returns:
-        str: "🔥3連勝" or "⤵️2連敗" or ""
-    """
-    if streak_value is None:
-        return ""
-    
-    try:
-        streak = int(float(streak_value))
-    except (ValueError, TypeError):
-        return ""
-    
-    if streak > 1:
-        return f"🔥{streak}連勝"
-    elif streak < -1:
-        return f"⤵️{abs(streak)}連敗"
-    else:
-        # 1, -1, 0 の場合は表示しない
-        return ""
-
-
 def parse_standings(data, target_teams):
-    """
-    ESPNのデータから指定チームの順位情報を抽出
-    
-    Returns:
-        dict: {"East": [...], "West": [...]}
-    """
+    """ESPNのデータから指定チームの順位情報を抽出"""
     results = {"East": [], "West": []}
     
     # 設定ファイルからチームIDのセットを作成
@@ -195,7 +159,6 @@ def parse_standings(data, target_teams):
     for team in target_teams:
         team_id = team["id"].upper()
         target_ids.add(team_id)
-        # 正規化されたIDも追加
         for orig, norm in TEAM_ABBR_NORMALIZE.items():
             if norm == team_id:
                 target_ids.add(orig)
@@ -205,12 +168,10 @@ def parse_standings(data, target_teams):
     for team in target_teams:
         team_id = team["id"].upper()
         team_config_map[team_id] = team
-        # 正規化前のIDでもマッピング
         for orig, norm in TEAM_ABBR_NORMALIZE.items():
             if norm == team_id:
                 team_config_map[orig] = team
     
-    # ESPNのデータ構造を解析
     if "children" not in data:
         print("❌ 予期しないデータ構造です")
         return results
@@ -219,7 +180,6 @@ def parse_standings(data, target_teams):
         conf_name = conference_data.get("name", "")
         conf_abbr = conference_data.get("abbreviation", "")
         
-        # カンファレンスを判定
         if "East" in conf_name or conf_abbr == "East":
             conf_key = "East"
         elif "West" in conf_name or conf_abbr == "West":
@@ -227,7 +187,6 @@ def parse_standings(data, target_teams):
         else:
             continue
         
-        # standings配列を取得
         standings = conference_data.get("standings", {}).get("entries", [])
         
         for entry in standings:
@@ -235,11 +194,9 @@ def parse_standings(data, target_teams):
             team_abbr = team_info.get("abbreviation", "").upper()
             normalized_abbr = normalize_team_abbr(team_abbr)
             
-            # 追跡対象のチームかチェック
             if team_abbr not in target_ids and normalized_abbr not in target_ids:
                 continue
             
-            # 設定からチーム情報を取得
             config = team_config_map.get(team_abbr) or team_config_map.get(normalized_abbr)
             if not config:
                 continue
@@ -251,15 +208,9 @@ def parse_standings(data, target_teams):
                 stat_value = stat.get("value", stat.get("displayValue", ""))
                 stats[stat_name] = stat_value
             
-            # 順位、勝敗を取得
             wins = int(stats.get("wins", 0))
             losses = int(stats.get("losses", 0))
             
-            # 連勝/連敗を取得
-            streak_value = stats.get("streak", None)
-            streak_display = format_streak(streak_value)
-            
-            # playoffSeedから順位を取得
             rank = int(stats.get("playoffSeed", 0))
             if rank == 0:
                 rank = int(stats.get("leagueRanking", 0))
@@ -271,7 +222,6 @@ def parse_standings(data, target_teams):
                 "rank": rank,
                 "wins": wins,
                 "losses": losses,
-                "streak": streak_display,
                 "conference": conf_key,
             }
             
@@ -286,7 +236,6 @@ def parse_standings(data, target_teams):
 
 def format_message(standings_data):
     """Discord投稿用のメッセージを整形"""
-    # 日本時間で日付を取得
     jst = timezone(timedelta(hours=9))
     today = datetime.now(jst).strftime("%Y/%m/%d")
     
@@ -298,10 +247,7 @@ def format_message(standings_data):
         for team in standings_data["East"]:
             rank_str = f"{team['rank']:>2}位"
             record = f"({team['wins']}勝{team['losses']}敗)"
-            line = f"{rank_str} {team['emoji']} {team['name']} {record}"
-            if team['streak']:
-                line += f" {team['streak']}"
-            lines.append(line)
+            lines.append(f"{rank_str} {team['emoji']} {team['name']} {record}")
         lines.append("")
     
     # Western Conference
@@ -310,10 +256,11 @@ def format_message(standings_data):
         for team in standings_data["West"]:
             rank_str = f"{team['rank']:>2}位"
             record = f"({team['wins']}勝{team['losses']}敗)"
-            line = f"{rank_str} {team['emoji']} {team['name']} {record}"
-            if team['streak']:
-                line += f" {team['streak']}"
-            lines.append(line)
+            lines.append(f"{rank_str} {team['emoji']} {team['name']} {record}")
+        lines.append("")
+    
+    # フッター
+    lines.append("📊 ESPN（前日までの結果）")
     
     return "\n".join(lines)
 
@@ -342,12 +289,12 @@ def main():
     # 0. レギュラーシーズン中かチェック
     if not is_regular_season():
         print("🏁 レギュラーシーズン期間外のため、投稿をスキップします")
-        return True  # エラーではないので成功として終了
+        return True
     
     # 1. 今日試合があるかチェック
     if not has_games_today():
         print("📭 今日は試合がないため、投稿をスキップします")
-        return True  # エラーではないので成功として終了
+        return True
     
     # 2. 設定読み込み
     config = load_config()
