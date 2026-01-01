@@ -1,0 +1,10 @@
+{
+    "teams": [
+        {"id": "OKC", "name": "サンダー", "emoji": "⚡"},
+        {"id": "ATL", "name": "ホークス", "emoji": "🦅"},
+        {"id": "DEN", "name": "ナゲッツ", "emoji": "⛏️"},
+        {"id": "CLE", "name": "キャブス", "emoji": "⚔️"},
+        {"id": "HOU", "name": "ロケッツ", "emoji": "🚀"},
+        {"id": "ORL", "name": "マジック", "emoji": "✨"}
+]
+}
