@@ -260,7 +260,7 @@ def format_message(standings_data):
         lines.append("")
     
     # フッター
-    lines.append("📊 ESPN（前日までの結果）")
+    lines.append("📊 最新の順位 → https://www.nba.com/standings")
     
     return "\n".join(lines)
 
