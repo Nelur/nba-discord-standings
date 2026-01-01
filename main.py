@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 
 # ESPN API エンドポイント（認証不要）
 ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 
 # ===== 全チームのマスターデータ =====
 TEAM_MASTER = {
@@ -77,6 +78,64 @@ def normalize_team_abbr(abbr):
     return TEAM_ABBR_NORMALIZE.get(upper_abbr, upper_abbr)
 
 
+def is_regular_season():
+    """
+    現在がレギュラーシーズン中かどうかを判定
+    NBAレギュラーシーズン: 通常10月下旬〜4月中旬
+    """
+    # 日本時間で判定
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    
+    # レギュラーシーズンの期間（おおよその目安）
+    # 10月20日〜4月15日をレギュラーシーズンとする
+    month = now.month
+    day = now.day
+    
+    # 10月20日以降 OR 1-4月 OR 4月15日以前
+    if month >= 10 and day >= 20:
+        return True
+    elif month in [11, 12, 1, 2, 3]:
+        return True
+    elif month == 4 and day <= 15:
+        return True
+    
+    print(f"📅 現在 ({now.strftime('%Y/%m/%d')}) はレギュラーシーズン期間外です")
+    return False
+
+
+def has_games_today():
+    """
+    今日NBAの試合があるかどうかをチェック
+    """
+    print("今日の試合を確認中...")
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+    }
+    
+    try:
+        response = requests.get(ESPN_SCOREBOARD_URL, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        events = data.get("events", [])
+        game_count = len(events)
+        
+        if game_count > 0:
+            print(f"✅ 今日は {game_count} 試合あります")
+            return True
+        else:
+            print("📭 今日は試合がありません")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ 試合情報の取得に失敗: {e}")
+        # エラーの場合は投稿を続行（安全側に倒す）
+        return True
+
+
 def get_espn_standings():
     """ESPN APIから順位データを取得"""
     print("ESPN APIから順位を取得中...")
@@ -95,6 +154,31 @@ def get_espn_standings():
     except requests.exceptions.RequestException as e:
         print(f"❌ ESPN API エラー: {e}")
         raise
+
+
+def format_streak(streak_value):
+    """
+    連勝/連敗を整形
+    正の値 = 連勝、負の値 = 連敗
+    
+    Returns:
+        str: "🔥3連勝" or "⤵️2連敗" or ""
+    """
+    if streak_value is None:
+        return ""
+    
+    try:
+        streak = int(float(streak_value))
+    except (ValueError, TypeError):
+        return ""
+    
+    if streak > 1:
+        return f"🔥{streak}連勝"
+    elif streak < -1:
+        return f"⤵️{abs(streak)}連敗"
+    else:
+        # 1, -1, 0 の場合は表示しない
+        return ""
 
 
 def parse_standings(data, target_teams):
@@ -127,7 +211,6 @@ def parse_standings(data, target_teams):
                 team_config_map[orig] = team
     
     # ESPNのデータ構造を解析
-    # children配列にカンファレンスごとのデータが入っている
     if "children" not in data:
         print("❌ 予期しないデータ構造です")
         return results
@@ -172,18 +255,13 @@ def parse_standings(data, target_teams):
             wins = int(stats.get("wins", 0))
             losses = int(stats.get("losses", 0))
             
-            # 直近10試合の成績を取得
-            # ESPNでは "record" や特定のstatで取得可能
-            last10 = stats.get("Last Ten Games Record", stats.get("streak", ""))
-            if not last10:
-                # 代替: streakを使用
-                streak_val = stats.get("streak", "")
-                last10 = streak_val if streak_val else "-"
+            # 連勝/連敗を取得
+            streak_value = stats.get("streak", None)
+            streak_display = format_streak(streak_value)
             
             # playoffSeedから順位を取得
             rank = int(stats.get("playoffSeed", 0))
             if rank == 0:
-                # clincher等から順位を推測
                 rank = int(stats.get("leagueRanking", 0))
             
             team_data = {
@@ -193,7 +271,7 @@ def parse_standings(data, target_teams):
                 "rank": rank,
                 "wins": wins,
                 "losses": losses,
-                "last10": last10,
+                "streak": streak_display,
                 "conference": conf_key,
             }
             
@@ -220,10 +298,9 @@ def format_message(standings_data):
         for team in standings_data["East"]:
             rank_str = f"{team['rank']:>2}位"
             record = f"({team['wins']}勝{team['losses']}敗)"
-            last10 = f"直近: {team['last10']}" if team['last10'] and team['last10'] != "-" else ""
             line = f"{rank_str} {team['emoji']} {team['name']} {record}"
-            if last10:
-                line += f" {last10}"
+            if team['streak']:
+                line += f" {team['streak']}"
             lines.append(line)
         lines.append("")
     
@@ -233,10 +310,9 @@ def format_message(standings_data):
         for team in standings_data["West"]:
             rank_str = f"{team['rank']:>2}位"
             record = f"({team['wins']}勝{team['losses']}敗)"
-            last10 = f"直近: {team['last10']}" if team['last10'] and team['last10'] != "-" else ""
             line = f"{rank_str} {team['emoji']} {team['name']} {record}"
-            if last10:
-                line += f" {last10}"
+            if team['streak']:
+                line += f" {team['streak']}"
             lines.append(line)
     
     return "\n".join(lines)
@@ -263,21 +339,31 @@ def main():
     print("NBA順位 Discord投稿Bot 開始")
     print("=" * 50)
     
-    # 1. 設定読み込み
+    # 0. レギュラーシーズン中かチェック
+    if not is_regular_season():
+        print("🏁 レギュラーシーズン期間外のため、投稿をスキップします")
+        return True  # エラーではないので成功として終了
+    
+    # 1. 今日試合があるかチェック
+    if not has_games_today():
+        print("📭 今日は試合がないため、投稿をスキップします")
+        return True  # エラーではないので成功として終了
+    
+    # 2. 設定読み込み
     config = load_config()
     target_teams = config["teams"]
     print(f"追跡チーム数: {len(target_teams)}")
     
-    # 2. Webhook URL取得（環境変数から）
+    # 3. Webhook URL取得（環境変数から）
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook_url:
         print("❌ エラー: DISCORD_WEBHOOK_URL が設定されていません")
         return False
     
-    # 3. ESPN APIから順位取得
+    # 4. ESPN APIから順位取得
     data = get_espn_standings()
     
-    # 4. 指定チームの順位を抽出
+    # 5. 指定チームの順位を抽出
     standings = parse_standings(data, target_teams)
     
     found_teams = len(standings["East"]) + len(standings["West"])
@@ -285,18 +371,17 @@ def main():
     
     if found_teams == 0:
         print("⚠️ 警告: チームが見つかりませんでした")
-        # デバッグ用にデータ構造を出力
         print("データ構造を確認中...")
         print(json.dumps(data, indent=2)[:2000])
         return False
     
-    # 5. メッセージ整形
+    # 6. メッセージ整形
     message = format_message(standings)
     print("\n--- 投稿内容 ---")
     print(message)
     print("--- ここまで ---\n")
     
-    # 6. Discord投稿
+    # 7. Discord投稿
     success = post_to_discord(message, webhook_url)
     
     print("=" * 50)
