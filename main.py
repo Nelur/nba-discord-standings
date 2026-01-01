@@ -1,14 +1,15 @@
 """
 NBA順位 Discord自動投稿Bot
-毎日指定チームの順位をDiscordに投稿する
+ESPN非公式APIを使用して順位を取得し、Discordに投稿する
 """
 
 import json
 import os
 import requests
-import time
 from datetime import datetime, timezone, timedelta
-from nba_api.stats.endpoints import leaguestandingsv3
+
+# ESPN API エンドポイント（認証不要）
+ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings"
 
 # ===== 全チームのマスターデータ =====
 TEAM_MASTER = {
@@ -31,19 +32,35 @@ TEAM_MASTER = {
     # Western Conference
     "DAL": {"name": "マブス", "emoji": "🐴", "conference": "West"},
     "DEN": {"name": "ナゲッツ", "emoji": "⛏️", "conference": "West"},
+    "GS": {"name": "ウォリアーズ", "emoji": "🌉", "conference": "West"},
     "GSW": {"name": "ウォリアーズ", "emoji": "🌉", "conference": "West"},
     "HOU": {"name": "ロケッツ", "emoji": "🚀", "conference": "West"},
     "LAC": {"name": "クリッパーズ", "emoji": "⛵", "conference": "West"},
     "LAL": {"name": "レイカーズ", "emoji": "💜", "conference": "West"},
     "MEM": {"name": "グリズリーズ", "emoji": "🐻", "conference": "West"},
     "MIN": {"name": "ウルブズ", "emoji": "🐺", "conference": "West"},
+    "NO": {"name": "ペリカンズ", "emoji": "🦢", "conference": "West"},
     "NOP": {"name": "ペリカンズ", "emoji": "🦢", "conference": "West"},
     "OKC": {"name": "サンダー", "emoji": "⚡", "conference": "West"},
     "PHX": {"name": "サンズ", "emoji": "☀️", "conference": "West"},
     "POR": {"name": "ブレイザーズ", "emoji": "🌲", "conference": "West"},
     "SAC": {"name": "キングス", "emoji": "👑", "conference": "West"},
+    "SA": {"name": "スパーズ", "emoji": "🤠", "conference": "West"},
     "SAS": {"name": "スパーズ", "emoji": "🤠", "conference": "West"},
     "UTA": {"name": "ジャズ", "emoji": "🎷", "conference": "West"},
+    "UTAH": {"name": "ジャズ", "emoji": "🎷", "conference": "West"},
+}
+
+# チーム略称の正規化マップ（ESPN APIの略称 → 標準ID）
+TEAM_ABBR_NORMALIZE = {
+    "GS": "GSW",
+    "NO": "NOP", 
+    "NY": "NYK",
+    "SA": "SAS",
+    "UTAH": "UTA",
+    "WSH": "WAS",
+    "PHO": "PHX",
+    "PHOE": "PHX",
 }
 
 
@@ -54,156 +71,150 @@ def load_config():
         return json.load(f)
 
 
-def get_current_season():
-    """現在のNBAシーズンを取得（例: 2024-25）"""
-    today = datetime.now()
-    # NBAシーズンは10月開始。1-9月は前年開始のシーズン
-    if today.month >= 10:
-        start_year = today.year
-    else:
-        start_year = today.year - 1
-    return f"{start_year}-{str(start_year + 1)[-2:]}"
+def normalize_team_abbr(abbr):
+    """チーム略称を正規化"""
+    upper_abbr = abbr.upper()
+    return TEAM_ABBR_NORMALIZE.get(upper_abbr, upper_abbr)
 
 
-def get_nba_standings_with_retry(max_retries=3, delay=10):
-    """
-    NBA APIから順位データを取得（リトライ機能付き）
-    """
-    season = get_current_season()
-    print(f"シーズン {season} の順位を取得中...")
+def get_espn_standings():
+    """ESPN APIから順位データを取得"""
+    print("ESPN APIから順位を取得中...")
     
-    # カスタムヘッダーを設定（ブラウザからのアクセスに見せかける）
-    custom_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Origin': 'https://www.nba.com',
-        'Referer': 'https://www.nba.com/',
-        'Connection': 'keep-alive',
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
     }
     
-    for attempt in range(max_retries):
-        try:
-            print(f"試行 {attempt + 1}/{max_retries}...")
-            
-            # タイムアウトを長めに設定
-            standings = leaguestandingsv3.LeagueStandingsV3(
-                league_id="00",
-                season=season,
-                season_type="Regular Season",
-                headers=custom_headers,
-                timeout=120  # 120秒に延長
-            )
-            df = standings.get_data_frames()[0]
-            print(f"✅ 順位データ取得成功！ ({len(df)} チーム)")
-            return df
-            
-        except Exception as e:
-            print(f"⚠️ 試行 {attempt + 1} 失敗: {e}")
-            if attempt < max_retries - 1:
-                wait_time = delay * (attempt + 1)  # 徐々に待ち時間を増やす
-                print(f"   {wait_time}秒後にリトライ...")
-                time.sleep(wait_time)
-            else:
-                print(f"❌ 全ての試行が失敗しました")
-                raise
+    try:
+        response = requests.get(ESPN_STANDINGS_URL, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        print("✅ ESPN APIからデータ取得成功！")
+        return data
+    except requests.exceptions.RequestException as e:
+        print(f"❌ ESPN API エラー: {e}")
+        raise
 
 
-def extract_team_standings(df, target_teams):
+def parse_standings(data, target_teams):
     """
-    指定チームの順位情報を抽出
-    
-    Returns:
-        dict: {"East": [...], "West": [...]}
+    ESPNのデータから指定チームの順位情報を抽出
     """
     results = {"East": [], "West": []}
     
-    for team_config in target_teams:
-        team_id = team_config["id"]
+    # 設定ファイルからチームIDのセットを作成
+    target_ids = set()
+    for team in target_teams:
+        team_id = team["id"].upper()
+        target_ids.add(team_id)
+        for orig, norm in TEAM_ABBR_NORMALIZE.items():
+            if norm == team_id:
+                target_ids.add(orig)
+    
+    # 設定からチーム情報を取得する辞書を作成
+    team_config_map = {}
+    for team in target_teams:
+        team_id = team["id"].upper()
+        team_config_map[team_id] = team
+        for orig, norm in TEAM_ABBR_NORMALIZE.items():
+            if norm == team_id:
+                team_config_map[orig] = team
+    
+    if "children" not in data:
+        print("❌ 予期しないデータ構造です")
+        return results
+    
+    for conference_data in data["children"]:
+        conf_name = conference_data.get("name", "")
+        conf_abbr = conference_data.get("abbreviation", "")
         
-        # config.jsonの設定を優先、なければマスターデータを使用
-        team_name = team_config.get("name", TEAM_MASTER.get(team_id, {}).get("name", team_id))
-        team_emoji = team_config.get("emoji", TEAM_MASTER.get(team_id, {}).get("emoji", "🏀"))
-        conference = TEAM_MASTER.get(team_id, {}).get("conference", "East")
-        
-        # DataFrameから該当チームを検索（複数の方法を試す）
-        team_row = None
-        
-        # 方法1: TeamSlugで検索
-        mask = df["TeamSlug"].str.lower() == team_id.lower()
-        if mask.any():
-            team_row = df[mask]
-        
-        # 方法2: TeamAbbreviationで検索（もし存在すれば）
-        if team_row is None or team_row.empty:
-            for col in ["TeamAbbreviation", "TeamTricode"]:
-                if col in df.columns:
-                    mask = df[col].str.upper() == team_id.upper()
-                    if mask.any():
-                        team_row = df[mask]
-                        break
-        
-        # 方法3: TeamCity + TeamNameで検索
-        if team_row is None or team_row.empty:
-            for _, row in df.iterrows():
-                team_full = f"{row.get('TeamCity', '')} {row.get('TeamName', '')}".lower()
-                if team_id.lower() in team_full:
-                    team_row = df[df.index == row.name]
-                    break
-        
-        if team_row is None or team_row.empty:
-            print(f"⚠️ 警告: チーム {team_id} ({team_name}) が見つかりません")
+        if "East" in conf_name or conf_abbr == "East":
+            conf_key = "East"
+        elif "West" in conf_name or conf_abbr == "West":
+            conf_key = "West"
+        else:
             continue
         
-        row = team_row.iloc[0]
+        standings = conference_data.get("standings", {}).get("entries", [])
         
-        team_data = {
-            "id": team_id,
-            "name": team_name,
-            "emoji": team_emoji,
-            "rank": int(row["PlayoffRank"]),
-            "wins": int(row["WINS"]),
-            "losses": int(row["LOSSES"]),
-            "last10": row["L10"],
-            "conference": conference,
-        }
-        
-        results[conference].append(team_data)
+        for entry in standings:
+            team_info = entry.get("team", {})
+            team_abbr = team_info.get("abbreviation", "").upper()
+            normalized_abbr = normalize_team_abbr(team_abbr)
+            
+            if team_abbr not in target_ids and normalized_abbr not in target_ids:
+                continue
+            
+            config = team_config_map.get(team_abbr) or team_config_map.get(normalized_abbr)
+            if not config:
+                continue
+            
+            stats = {}
+            for stat in entry.get("stats", []):
+                stat_name = stat.get("name", "")
+                stat_value = stat.get("value", stat.get("displayValue", ""))
+                stats[stat_name] = stat_value
+            
+            wins = int(stats.get("wins", 0))
+            losses = int(stats.get("losses", 0))
+            last10 = stats.get("Last Ten Games Record", stats.get("streak", ""))
+            if not last10:
+                streak_val = stats.get("streak", "")
+                last10 = streak_val if streak_val else "-"
+            
+            rank = int(stats.get("playoffSeed", 0))
+            if rank == 0:
+                rank = int(stats.get("leagueRanking", 0))
+            
+            team_data = {
+                "id": normalized_abbr,
+                "name": config.get("name", TEAM_MASTER.get(normalized_abbr, {}).get("name", team_abbr)),
+                "emoji": config.get("emoji", TEAM_MASTER.get(normalized_abbr, {}).get("emoji", "🏀")),
+                "rank": rank,
+                "wins": wins,
+                "losses": losses,
+                "last10": last10,
+                "conference": conf_key,
+            }
+            
+            results[conf_key].append(team_data)
     
-    # 順位でソート
-    results["East"].sort(key=lambda x: x["rank"])
-    results["West"].sort(key=lambda x: x["rank"])
+    results["East"].sort(key=lambda x: x["rank"] if x["rank"] > 0 else 999)
+    results["West"].sort(key=lambda x: x["rank"] if x["rank"] > 0 else 999)
     
     return results
 
 
 def format_message(standings_data):
     """Discord投稿用のメッセージを整形"""
-    # 日本時間で日付を取得
     jst = timezone(timedelta(hours=9))
     today = datetime.now(jst).strftime("%Y/%m/%d")
     
     lines = [f"🏀 NBA順位 ({today})", ""]
     
-    # Eastern Conference
     if standings_data["East"]:
         lines.append("【Eastern】")
         for team in standings_data["East"]:
             rank_str = f"{team['rank']:>2}位"
             record = f"({team['wins']}勝{team['losses']}敗)"
-            last10 = f"直近: {team['last10']}"
-            lines.append(f"{rank_str} {team['emoji']} {team['name']} {record} {last10}")
+            last10 = f"直近: {team['last10']}" if team['last10'] and team['last10'] != "-" else ""
+            line = f"{rank_str} {team['emoji']} {team['name']} {record}"
+            if last10:
+                line += f" {last10}"
+            lines.append(line)
         lines.append("")
     
-    # Western Conference
     if standings_data["West"]:
         lines.append("【Western】")
         for team in standings_data["West"]:
             rank_str = f"{team['rank']:>2}位"
             record = f"({team['wins']}勝{team['losses']}敗)"
-            last10 = f"直近: {team['last10']}"
-            lines.append(f"{rank_str} {team['emoji']} {team['name']} {record} {last10}")
+            last10 = f"直近: {team['last10']}" if team['last10'] and team['last10'] != "-" else ""
+            line = f"{rank_str} {team['emoji']} {team['name']} {record}"
+            if last10:
+                line += f" {last10}"
+            lines.append(line)
     
     return "\n".join(lines)
 
@@ -211,7 +222,6 @@ def format_message(standings_data):
 def post_to_discord(message, webhook_url):
     """Discord Webhookにメッセージを投稿"""
     payload = {"content": message}
-    
     response = requests.post(webhook_url, json=payload)
     
     if response.status_code == 204:
@@ -229,31 +239,32 @@ def main():
     print("NBA順位 Discord投稿Bot 開始")
     print("=" * 50)
     
-    # 1. 設定読み込み
     config = load_config()
     target_teams = config["teams"]
     print(f"追跡チーム数: {len(target_teams)}")
     
-    # 2. Webhook URL取得（環境変数から）
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook_url:
         print("❌ エラー: DISCORD_WEBHOOK_URL が設定されていません")
         return False
     
-    # 3. NBA順位取得（リトライ機能付き）
-    df = get_nba_standings_with_retry(max_retries=3, delay=10)
-    print(f"取得チーム数: {len(df)}")
+    data = get_espn_standings()
+    standings = parse_standings(data, target_teams)
     
-    # 4. 指定チームの順位を抽出
-    standings = extract_team_standings(df, target_teams)
+    found_teams = len(standings["East"]) + len(standings["West"])
+    print(f"取得チーム数: {found_teams}")
     
-    # 5. メッセージ整形
+    if found_teams == 0:
+        print("⚠️ 警告: チームが見つかりませんでした")
+        print("データ構造を確認中...")
+        print(json.dumps(data, indent=2)[:2000])
+        return False
+    
     message = format_message(standings)
     print("\n--- 投稿内容 ---")
     print(message)
     print("--- ここまで ---\n")
     
-    # 6. Discord投稿
     success = post_to_discord(message, webhook_url)
     
     print("=" * 50)
@@ -266,3 +277,10 @@ def main():
 if __name__ == "__main__":
     success = main()
     exit(0 if success else 1)
+```
+
+### 2. requirements.txt を更新
+
+同様に編集 → **全部消して**以下を貼り付け：
+```
+requests>=2.28.0
