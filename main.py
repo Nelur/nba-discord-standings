@@ -6,6 +6,7 @@ NBA順位 Discord自動投稿Bot
 import json
 import os
 import requests
+import time
 from datetime import datetime, timezone, timedelta
 from nba_api.stats.endpoints import leaguestandingsv3
 
@@ -45,16 +46,6 @@ TEAM_MASTER = {
     "UTA": {"name": "ジャズ", "emoji": "🎷", "conference": "West"},
 }
 
-# チームIDの変換マップ（NBA APIの略称 → 標準ID）
-TEAM_ABBR_MAP = {
-    "ATL": "ATL", "BOS": "BOS", "BKN": "BKN", "CHA": "CHA", "CHI": "CHI",
-    "CLE": "CLE", "DAL": "DAL", "DEN": "DEN", "DET": "DET", "GSW": "GSW",
-    "HOU": "HOU", "IND": "IND", "LAC": "LAC", "LAL": "LAL", "MEM": "MEM",
-    "MIA": "MIA", "MIL": "MIL", "MIN": "MIN", "NOP": "NOP", "NYK": "NYK",
-    "OKC": "OKC", "ORL": "ORL", "PHI": "PHI", "PHX": "PHX", "POR": "POR",
-    "SAC": "SAC", "SAS": "SAS", "TOR": "TOR", "UTA": "UTA", "WAS": "WAS",
-}
-
 
 def load_config():
     """設定ファイルを読み込む"""
@@ -74,22 +65,49 @@ def get_current_season():
     return f"{start_year}-{str(start_year + 1)[-2:]}"
 
 
-def get_nba_standings():
-    """NBA APIから順位データを取得"""
+def get_nba_standings_with_retry(max_retries=3, delay=10):
+    """
+    NBA APIから順位データを取得（リトライ機能付き）
+    """
     season = get_current_season()
     print(f"シーズン {season} の順位を取得中...")
     
-    try:
-        standings = leaguestandingsv3.LeagueStandingsV3(
-            league_id="00",
-            season=season,
-            season_type="Regular Season"
-        )
-        df = standings.get_data_frames()[0]
-        return df
-    except Exception as e:
-        print(f"NBA API エラー: {e}")
-        raise
+    # カスタムヘッダーを設定（ブラウザからのアクセスに見せかける）
+    custom_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Origin': 'https://www.nba.com',
+        'Referer': 'https://www.nba.com/',
+        'Connection': 'keep-alive',
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"試行 {attempt + 1}/{max_retries}...")
+            
+            # タイムアウトを長めに設定
+            standings = leaguestandingsv3.LeagueStandingsV3(
+                league_id="00",
+                season=season,
+                season_type="Regular Season",
+                headers=custom_headers,
+                timeout=120  # 120秒に延長
+            )
+            df = standings.get_data_frames()[0]
+            print(f"✅ 順位データ取得成功！ ({len(df)} チーム)")
+            return df
+            
+        except Exception as e:
+            print(f"⚠️ 試行 {attempt + 1} 失敗: {e}")
+            if attempt < max_retries - 1:
+                wait_time = delay * (attempt + 1)  # 徐々に待ち時間を増やす
+                print(f"   {wait_time}秒後にリトライ...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ 全ての試行が失敗しました")
+                raise
 
 
 def extract_team_standings(df, target_teams):
@@ -109,19 +127,33 @@ def extract_team_standings(df, target_teams):
         team_emoji = team_config.get("emoji", TEAM_MASTER.get(team_id, {}).get("emoji", "🏀"))
         conference = TEAM_MASTER.get(team_id, {}).get("conference", "East")
         
-        # DataFrameから該当チームを検索
-        team_row = df[df["TeamSlug"].str.upper() == team_id.lower()]
+        # DataFrameから該当チームを検索（複数の方法を試す）
+        team_row = None
         
-        if team_row.empty:
-            # TeamSlugで見つからない場合、TeamCityとTeamNameの組み合わせで検索
+        # 方法1: TeamSlugで検索
+        mask = df["TeamSlug"].str.lower() == team_id.lower()
+        if mask.any():
+            team_row = df[mask]
+        
+        # 方法2: TeamAbbreviationで検索（もし存在すれば）
+        if team_row is None or team_row.empty:
+            for col in ["TeamAbbreviation", "TeamTricode"]:
+                if col in df.columns:
+                    mask = df[col].str.upper() == team_id.upper()
+                    if mask.any():
+                        team_row = df[mask]
+                        break
+        
+        # 方法3: TeamCity + TeamNameで検索
+        if team_row is None or team_row.empty:
             for _, row in df.iterrows():
-                slug = f"{row['TeamCity']} {row['TeamName']}"
-                if team_id in row.get("TeamAbbreviation", "").upper() or team_id.upper() in slug.upper():
+                team_full = f"{row.get('TeamCity', '')} {row.get('TeamName', '')}".lower()
+                if team_id.lower() in team_full:
                     team_row = df[df.index == row.name]
                     break
         
-        if team_row.empty:
-            print(f"警告: チーム {team_id} が見つかりません")
+        if team_row is None or team_row.empty:
+            print(f"⚠️ 警告: チーム {team_id} ({team_name}) が見つかりません")
             continue
         
         row = team_row.iloc[0]
@@ -208,8 +240,8 @@ def main():
         print("❌ エラー: DISCORD_WEBHOOK_URL が設定されていません")
         return False
     
-    # 3. NBA順位取得
-    df = get_nba_standings()
+    # 3. NBA順位取得（リトライ機能付き）
+    df = get_nba_standings_with_retry(max_retries=3, delay=10)
     print(f"取得チーム数: {len(df)}")
     
     # 4. 指定チームの順位を抽出
