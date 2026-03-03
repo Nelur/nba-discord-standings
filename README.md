@@ -1,5 +1,7 @@
 # 🏀 NBA順位 Discord自動投稿Bot
 
+更新
+
 指定したNBAチームの順位を毎日Discordに自動投稿するBot。
 
 ## 投稿イメージ
